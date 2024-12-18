@@ -1,50 +1,46 @@
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{debug_handler, Json, Router};
 use opensearch::auth::Credentials;
 use opensearch::cert::CertificateValidation;
-use opensearch::http::transport::{BuildError, SingleNodeConnectionPool, TransportBuilder};
+use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
 use opensearch::{OpenSearch, SearchParts};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::Value;
 use std::sync::Arc;
-use thiserror::Error;
+use tracing_subscriber::FmtSubscriber;
 use url::Url;
-
-#[derive(Error, Debug)]
-enum AppError {
-    #[error("Url parse error")]
-    UrlParse(#[from] url::ParseError),
-    #[error("Opensearch transport build error")]
-    OpenSearchTransportBuild(#[from] BuildError),
-    #[error("Opensearch request error")]
-    OpenSearchRequest(#[from] opensearch::Error),
-    #[error("")]
-    SerdeJson(#[from] serde_json::Error),
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        StatusCode::INTERNAL_SERVER_ERROR.into_response()
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
+    let subscriber = FmtSubscriber::builder()
+        .with_line_number(true)
+        .with_file(true)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+
     let url = std::env::var("OPEN_SEARCH_URL").expect("No open search url provided");
-    let url = Url::parse(&url)?;
+    let open_search_username =
+        std::env::var("OPEN_SEARCH_USERNAME").expect("No open search username provided");
+    let open_search_password =
+        std::env::var("OPEN_SEARCH_PASSWORD").expect("No open search password");
+    let url = Url::parse(&url).map_err(|err| AppError::Error(err.to_string()))?;
     let conn_pool = SingleNodeConnectionPool::new(url);
     let transport = TransportBuilder::new(conn_pool)
         .disable_proxy()
         .cert_validation(CertificateValidation::None)
-        .auth(Credentials::Basic("admin".into(), "admin".into()))
-        .build()?;
+        .auth(Credentials::Basic(
+            open_search_username,
+            open_search_password,
+        ))
+        .build()
+        .map_err(|err| AppError::Error(err.to_string()))?;
     let client = OpenSearch::new(transport);
 
     let app = Router::new()
-        .route("/first-names/:name", get(handler))
+        .route("/query", get(handler))
         .with_state(Arc::new(client));
 
     // run it
@@ -52,6 +48,7 @@ async fn main() -> Result<(), AppError> {
         .await
         .unwrap();
 
+    tracing::info!("Server is listening on port 3000");
     axum::serve(listener, app).await.unwrap();
     Ok(())
 }
@@ -59,16 +56,17 @@ async fn main() -> Result<(), AppError> {
 #[debug_handler]
 async fn handler(
     State(client): State<Arc<OpenSearch>>,
-    Path(name): Path<String>,
+    Json(query): Json<Value>,
 ) -> Result<Json<Vec<OpenSearchResponseRow>>, AppError> {
     let response = client
         .search(SearchParts::Index(&["ecommerce"]))
-        .from(0)
-        .body(json!({"query":{"match":{"customer_first_name":name}}}))
+        .body(query)
         .send()
-        .await?
+        .await
+        .map_err(|err| AppError::Error(err.to_string()))?
         .json::<OpenSearchResponse>()
-        .await?;
+        .await
+        .map_err(|err| AppError::Error(err.to_string()))?;
 
     Ok(Json(response.hits.hits))
 }
@@ -127,4 +125,20 @@ struct Product {
     price: f32,
     taxful_price: f32,
     base_unit_price: f32,
+}
+
+#[derive(Debug)]
+enum AppError {
+    #[allow(dead_code)]
+    AuthError(StatusCode),
+    Error(String),
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        match self {
+            AppError::AuthError(status) => status.into_response(),
+            AppError::Error(s) => (StatusCode::INTERNAL_SERVER_ERROR, s).into_response(),
+        }
+    }
 }
