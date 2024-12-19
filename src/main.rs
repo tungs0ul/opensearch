@@ -1,20 +1,11 @@
-use axum::extract::State;
-use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
-use axum::routing::get;
-use axum::{debug_handler, Json, Router};
-use opensearch::auth::Credentials;
-use opensearch::cert::CertificateValidation;
-use opensearch::http::transport::{SingleNodeConnectionPool, TransportBuilder};
-use opensearch::{OpenSearch, SearchParts};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::sync::Arc;
+use open_search_api::api;
+use open_search_api::opensearch_client;
+use std::net::SocketAddr;
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
 
 #[tokio::main]
-async fn main() -> Result<(), AppError> {
+async fn main() {
     let subscriber = FmtSubscriber::builder()
         .with_line_number(true)
         .with_file(true)
@@ -26,119 +17,19 @@ async fn main() -> Result<(), AppError> {
         std::env::var("OPEN_SEARCH_USERNAME").expect("No open search username provided");
     let open_search_password =
         std::env::var("OPEN_SEARCH_PASSWORD").expect("No open search password");
-    let url = Url::parse(&url).map_err(|err| AppError::Error(err.to_string()))?;
-    let conn_pool = SingleNodeConnectionPool::new(url);
-    let transport = TransportBuilder::new(conn_pool)
-        .disable_proxy()
-        .cert_validation(CertificateValidation::None)
-        .auth(Credentials::Basic(
-            open_search_username,
-            open_search_password,
-        ))
-        .build()
-        .map_err(|err| AppError::Error(err.to_string()))?;
-    let client = OpenSearch::new(transport);
+    let url = Url::parse(&url).expect("Incorrect opensearch url");
+    let client = opensearch_client::build_client(url, open_search_username, open_search_password);
+    let app = api::build_router(client);
 
-    let app = Router::new()
-        .route("/query", get(handler))
-        .with_state(Arc::new(client));
-
-    // run it
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
+    let port = std::env::var("API_PORT")
+        .expect("No api port")
+        .parse()
+        .expect("Could not parse port");
+    let addr = SocketAddr::from(([0, 0, 0, 0], port));
+    let listener = tokio::net::TcpListener::bind(addr)
         .await
-        .unwrap();
+        .expect("Could not bind to {port}");
 
     tracing::info!("Server is listening on port 3000");
     axum::serve(listener, app).await.unwrap();
-    Ok(())
-}
-
-#[debug_handler]
-async fn handler(
-    State(client): State<Arc<OpenSearch>>,
-    Json(query): Json<Value>,
-) -> Result<Json<Vec<OpenSearchResponseRow>>, AppError> {
-    let response = client
-        .search(SearchParts::Index(&["ecommerce"]))
-        .body(query)
-        .send()
-        .await
-        .map_err(|err| AppError::Error(err.to_string()))?
-        .json::<OpenSearchResponse>()
-        .await
-        .map_err(|err| AppError::Error(err.to_string()))?;
-
-    Ok(Json(response.hits.hits))
-}
-
-#[derive(Deserialize, Debug)]
-struct OpenSearchResponse {
-    hits: OpenSearchResponseHit,
-}
-
-#[derive(Deserialize, Debug)]
-struct OpenSearchResponseHit {
-    hits: Vec<OpenSearchResponseRow>,
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-struct OpenSearchResponseRow {
-    _source: OpenSearchSource,
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-struct OpenSearchSource {
-    currency: String,
-    customer_first_name: String,
-    customer_full_name: String,
-    customer_gender: String,
-    customer_id: i32,
-    customer_last_name: String,
-    customer_phone: String,
-    day_of_week: String,
-    day_of_week_i: u8,
-    email: String,
-    manufacturer: Vec<String>,
-    order_date: chrono::DateTime<chrono::Utc>,
-    category: Vec<String>,
-    order_id: i32,
-    products: Vec<Product>,
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-struct Product {
-    base_price: f32,
-    discount_percentage: f32,
-    quantity: u8,
-    manufacturer: String,
-    tax_amount: f32,
-    product_id: i32,
-    category: String,
-    sku: String,
-    taxless_price: f32,
-    unit_discount_amount: u8,
-    min_price: f32,
-    _id: String,
-    discount_amount: f32,
-    created_on: chrono::DateTime<chrono::Utc>,
-    product_name: String,
-    price: f32,
-    taxful_price: f32,
-    base_unit_price: f32,
-}
-
-#[derive(Debug)]
-enum AppError {
-    #[allow(dead_code)]
-    AuthError(StatusCode),
-    Error(String),
-}
-
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        match self {
-            AppError::AuthError(status) => status.into_response(),
-            AppError::Error(s) => (StatusCode::INTERNAL_SERVER_ERROR, s).into_response(),
-        }
-    }
 }
