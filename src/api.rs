@@ -1,46 +1,32 @@
+use crate::opensearch_client::OpenSearchClient;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{debug_handler, Json, Router};
-use opensearch::{OpenSearch, SearchParts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
 
-pub fn build_router(client: OpenSearch) -> Router {
+pub fn build_router(opensearch_client: OpenSearchClient) -> Router {
+    let state = AppState::new(opensearch_client);
     Router::new()
         .route("/health_check", get(|| async { StatusCode::OK }))
         .route("/query", get(query_handler))
-        .with_state(Arc::new(client))
+        .with_state(Arc::new(state))
 }
 
 #[debug_handler]
 async fn query_handler(
-    State(client): State<Arc<OpenSearch>>,
+    State(state): State<Arc<AppState>>,
     Json(query): Json<Value>,
 ) -> Result<Json<Vec<OpenSearchResponseRow>>, AppError> {
-    let response = client
-        .search(SearchParts::Index(&["ecommerce"]))
-        .body(query)
-        .send()
-        .await
-        .map_err(|err| AppError::Error(err.to_string()))?
-        .json::<OpenSearchResponse>()
+    let result = state
+        .opensearch_client
+        .query("ecommerce", query)
         .await
         .map_err(|err| AppError::Error(err.to_string()))?;
-
-    Ok(Json(response.hits.hits))
-}
-
-#[derive(Deserialize, Debug)]
-struct OpenSearchResponse {
-    hits: OpenSearchResponseHit,
-}
-
-#[derive(Deserialize, Debug)]
-struct OpenSearchResponseHit {
-    hits: Vec<OpenSearchResponseRow>,
+    Ok(Json(result))
 }
 
 #[derive(Deserialize, Debug, Serialize)]
@@ -102,5 +88,15 @@ impl IntoResponse for AppError {
             AppError::AuthError(status) => status.into_response(),
             AppError::Error(s) => (StatusCode::INTERNAL_SERVER_ERROR, s).into_response(),
         }
+    }
+}
+
+pub struct AppState {
+    opensearch_client: OpenSearchClient,
+}
+
+impl AppState {
+    pub fn new(opensearch_client: OpenSearchClient) -> Self {
+        Self { opensearch_client }
     }
 }

@@ -24,4 +24,16 @@ Content-Type: application/json
 
 
 ###
+GET http://localhost:{{port}}/query
+Content-Type: application/json
+
+{
+  "query": {
+    "match": {
+      "customer_last_name": "Carpenter"
+    }
+  }
+}
+
+###
 GET http://localhost:{{port}}/health_check

@@ -1,5 +1,5 @@
 use open_search_api::api;
-use open_search_api::opensearch_client;
+use open_search_api::opensearch_client::OpenSearchClient;
 use std::net::SocketAddr;
 use tracing_subscriber::FmtSubscriber;
 use url::Url;
@@ -18,7 +18,7 @@ async fn main() {
     let open_search_password =
         std::env::var("OPEN_SEARCH_PASSWORD").expect("No open search password");
     let url = Url::parse(&url).expect("Incorrect opensearch url");
-    let client = opensearch_client::build_client(url, open_search_username, open_search_password);
+    let client = OpenSearchClient::new(url, open_search_username, open_search_password);
     let app = api::build_router(client);
 
     let port = std::env::var("API_PORT")
